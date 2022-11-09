@@ -15,6 +15,8 @@
 package metrics
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -23,10 +25,26 @@ import (
 	"github.com/google/cadvisor/container"
 	info "github.com/google/cadvisor/info/v1"
 	v2 "github.com/google/cadvisor/info/v2"
+	"github.com/google/cadvisor/pkg/awsclient"
+	"github.com/rosenlo/toolkits/safemap"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
+)
+
+const (
+	LabelECSCluster           = "com.amazonaws.ecs.cluster"
+	LabelECSTaskARN           = "com.amazonaws.ecs.task-arn"
+	LabelECSTaskIP            = "com.amazonaws.ecs.task-ip"
+	DefaultCleanDuration      = time.Hour
+	DefaultExpirationDuration = time.Hour * 24
+)
+
+var (
+	// hash-task-arn:task-ip
+	ECSTaskCacheMap = safemap.New(safemap.Options{CleanDuration: DefaultCleanDuration})
+	awsClient       = awsclient.MustNew(nil)
 )
 
 // asFloat64 converts a uint64 into a float64.
@@ -1826,13 +1844,52 @@ func DefaultContainerLabels(container *info.ContainerInfo) map[string]string {
 	if image := container.Spec.Image; len(image) > 0 {
 		set[LabelImage] = image
 	}
+	var ecsCluster, ecsTaskArn string
 	for k, v := range container.Spec.Labels {
+		if k == LabelECSCluster {
+			ecsCluster = v
+		} else if k == LabelECSTaskARN {
+			ecsTaskArn = v
+		}
 		set[ContainerLabelPrefix+k] = v
 	}
+
+	if ecsCluster != "" && ecsTaskArn != "" {
+		hash := md5.Sum([]byte(ecsTaskArn))
+		hashKey := hex.EncodeToString(hash[:])
+
+		if taskIP, exists := ECSTaskCacheMap.Get(hashKey); exists {
+			set[ContainerLabelPrefix+LabelECSTaskIP] = taskIP.(string)
+		} else {
+			if ip := DescribeECSTask(ecsCluster, ecsTaskArn); ip != nil {
+				ECSTaskCacheMap.Set(hashKey, *ip, DefaultExpirationDuration)
+				set[ContainerLabelPrefix+LabelECSTaskIP] = *ip
+			}
+		}
+	}
+
 	for k, v := range container.Spec.Envs {
 		set[ContainerEnvPrefix+k] = v
 	}
 	return set
+}
+
+func DescribeECSTask(ecsCluster, ecsTaskArn string) *string {
+	task, err := awsClient.DescribeECSTask(&ecsCluster, ecsTaskArn)
+
+	if err != nil {
+		klog.Errorf("failed to describe tasks: %s", err)
+		return nil
+	}
+
+	for _, c := range task.Containers {
+		for _, i := range c.NetworkInterfaces {
+			if i.PrivateIpv4Address != nil {
+				return i.PrivateIpv4Address
+			}
+		}
+	}
+	return nil
 }
 
 // BaseContainerLabels returns a ContainerLabelsFunc that exports the container

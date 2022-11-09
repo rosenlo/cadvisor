@@ -6,6 +6,11 @@ require (
 	cloud.google.com/go v0.65.0
 	github.com/Microsoft/go-winio v0.4.15
 	github.com/aws/aws-sdk-go v1.35.24
+	github.com/aws/aws-sdk-go-v2 v1.17.1
+	github.com/aws/aws-sdk-go-v2/config v1.17.10
+	github.com/aws/aws-sdk-go-v2/credentials v1.12.23
+	github.com/aws/aws-sdk-go-v2/service/ecs v1.18.26
+	github.com/aws/aws-sdk-go-v2/service/sts v1.17.1
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/containerd/ttrpc v1.1.0
 	github.com/containerd/typeurl v1.0.2
@@ -30,9 +35,10 @@ require (
 	github.com/prometheus/client_golang v1.13.0
 	github.com/prometheus/client_model v0.2.0
 	github.com/prometheus/common v0.37.0
+	github.com/rosenlo/toolkits v0.1.2
 	github.com/stretchr/testify v1.8.0
-	golang.org/x/net v0.0.0-20220225172249-27dd8689420f
-	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a
+	golang.org/x/net v0.1.0
+	golang.org/x/sys v0.1.0
 	google.golang.org/grpc v1.49.0
 	k8s.io/klog/v2 v2.80.1
 	k8s.io/utils v0.0.0-20211116205334-6203023598ed
