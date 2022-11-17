@@ -17,15 +17,18 @@ package metrics
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/cadvisor/container"
 	info "github.com/google/cadvisor/info/v1"
 	v2 "github.com/google/cadvisor/info/v2"
-	"github.com/google/cadvisor/pkg/awsclient"
 	"github.com/rosenlo/toolkits/safemap"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,6 +40,7 @@ const (
 	LabelECSCluster           = "com.amazonaws.ecs.cluster"
 	LabelECSTaskARN           = "com.amazonaws.ecs.task-arn"
 	LabelECSTaskIP            = "com.amazonaws.ecs.task-ip"
+	ECSContainerMetadataURI   = "ECS_CONTAINER_METADATA_URI_V4"
 	DefaultCleanDuration      = time.Hour
 	DefaultExpirationDuration = time.Hour * 24
 )
@@ -44,7 +48,6 @@ const (
 var (
 	// hash-task-arn:task-ip
 	ECSTaskCacheMap = safemap.New(safemap.Options{CleanDuration: DefaultCleanDuration})
-	awsClient       = awsclient.MustNew(nil)
 )
 
 // asFloat64 converts a uint64 into a float64.
@@ -1833,6 +1836,38 @@ const (
 	LabelImage = "image"
 )
 
+type ContainerMetadata struct {
+	Networks []struct {
+		IPv4Addresses []string `json:"IPv4Addresses"`
+	} `json:"Networks"`
+}
+
+func FetchContainerMetadata(url string) (*ContainerMetadata, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	client := http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	var containerMetada ContainerMetadata
+
+	defer resp.Body.Close()
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	err = json.Unmarshal(respBody, &containerMetada)
+	if err != nil {
+		return nil, err
+	}
+	return &containerMetada, nil
+}
+
 // DefaultContainerLabels implements ContainerLabelsFunc. It exports the
 // container name, first alias, image name as well as all its env and label
 // values.
@@ -1844,52 +1879,49 @@ func DefaultContainerLabels(container *info.ContainerInfo) map[string]string {
 	if image := container.Spec.Image; len(image) > 0 {
 		set[LabelImage] = image
 	}
-	var ecsCluster, ecsTaskArn string
+	var ecsTaskArn, metadataUrl, taskIP string
 	for k, v := range container.Spec.Labels {
-		if k == LabelECSCluster {
-			ecsCluster = v
-		} else if k == LabelECSTaskARN {
+		if k == LabelECSTaskARN {
 			ecsTaskArn = v
 		}
 		set[ContainerLabelPrefix+k] = v
 	}
 
-	if ecsCluster != "" && ecsTaskArn != "" {
-		hash := md5.Sum([]byte(ecsTaskArn))
-		hashKey := hex.EncodeToString(hash[:])
-
-		if taskIP, exists := ECSTaskCacheMap.Get(hashKey); exists {
-			set[ContainerLabelPrefix+LabelECSTaskIP] = taskIP.(string)
-		} else {
-			if ip := DescribeECSTask(ecsCluster, ecsTaskArn); ip != nil {
-				ECSTaskCacheMap.Set(hashKey, *ip, DefaultExpirationDuration)
-				set[ContainerLabelPrefix+LabelECSTaskIP] = *ip
-			}
-		}
-	}
-
 	for k, v := range container.Spec.Envs {
+		if strings.ToUpper(k) == ECSContainerMetadataURI {
+			metadataUrl = v
+		}
 		set[ContainerEnvPrefix+k] = v
 	}
-	return set
-}
 
-func DescribeECSTask(ecsCluster, ecsTaskArn string) *string {
-	task, err := awsClient.DescribeECSTask(&ecsCluster, ecsTaskArn)
-
-	if err != nil {
-		klog.Errorf("failed to describe tasks: %s", err)
-		return nil
+	if ecsTaskArn == "" || metadataUrl == "" {
+		return set
 	}
 
-	for _, c := range task.Containers {
-		for _, i := range c.NetworkInterfaces {
-			if i.PrivateIpv4Address != nil {
-				return i.PrivateIpv4Address
-			}
+	hash := md5.Sum([]byte(ecsTaskArn))
+	hashKey := hex.EncodeToString(hash[:])
+
+	if taskIP, exists := ECSTaskCacheMap.Get(hashKey); exists {
+		set[ContainerLabelPrefix+LabelECSTaskIP] = taskIP.(string)
+		return set
+	}
+
+	containerMetadata, err := FetchContainerMetadata(metadataUrl)
+	if err != nil {
+		klog.Errorf("failed to fetch container metadata: %s", err)
+		return set
+	}
+
+	for _, networks := range containerMetadata.Networks {
+		if len(networks.IPv4Addresses) > 0 {
+			taskIP = networks.IPv4Addresses[0]
 		}
 	}
-	return nil
+
+	ECSTaskCacheMap.Set(hashKey, taskIP, DefaultExpirationDuration)
+	set[ContainerLabelPrefix+LabelECSTaskIP] = taskIP
+
+	return set
 }
 
 // BaseContainerLabels returns a ContainerLabelsFunc that exports the container
